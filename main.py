@@ -1,63 +1,64 @@
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-import yt_dlp
-import pathlib
-import tempfile
-import re
+import subprocess
+import uuid
+import os
 
 app = FastAPI(title="YouTube to MP3 API")
 
-TMP_DIR = pathlib.Path(tempfile.gettempdir()) / "yt_mp3_tmp"
-TMP_DIR.mkdir(parents=True, exist_ok=True)
+# Create downloads folder
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-def sanitize(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]+', "_", name)[:200]
-
-
-@app.get("/download")
-async def download(url: str, background_tasks: BackgroundTasks):
-    if not url:
-        raise HTTPException(400, "Missing ?url=")
-
-    ydl_opts = {
-        "format": "bestaudio",
-        "outtmpl": str(TMP_DIR / "%(id)s.%(ext)s"),
-        "quiet": True,
-        "noplaylist": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except Exception as e:
-        raise HTTPException(422, f"Download error: {e}")
-
-    video_id = info.get("id")
-    title = info.get("title") or "audio"
-    mp3_file = TMP_DIR / f"{video_id}.mp3"
-
-    if not mp3_file.exists():
-        raise HTTPException(500, "MP3 not found after conversion")
-
-    safe_name = sanitize(title) + ".mp3"
-
-    def cleanup(path):
-        p = pathlib.Path(path)
-        if p.exists():
-            p.unlink()
-
-    background_tasks.add_task(cleanup, str(mp3_file))
-
-    return FileResponse(str(mp3_file), filename=safe_name, media_type="audio/mpeg")
-
+# Use cookies.txt if exists
+COOKIES_FILE = "cookies.txt" if os.path.exists("cookies.txt") else None
 
 @app.get("/")
-async def home():
-    return {"status": "running", "usage": "/download?url=YOUTUBE_URL"}
+def home():
+    return {"status": "YouTube MP3 API running", "cookies_loaded": bool(COOKIES_FILE)}
+
+@app.get("/mp3")
+def download_mp3(url: str):
+    """
+    Download a YouTube video as MP3.
+    Example: /mp3?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ
+    """
+    try:
+        # Unique filename
+        file_id = str(uuid.uuid4())
+        mp3_path = f"{DOWNLOAD_DIR}/{file_id}.mp3"
+
+        # Build yt-dlp command
+        command = [
+            "yt-dlp",
+            "-f", "bestaudio",
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "-o", mp3_path.replace(".mp3", ".%(ext)s"),
+            url
+        ]
+
+        # Add cookies if present
+        if COOKIES_FILE:
+            command += ["--cookies", COOKIES_FILE]
+
+        # Run yt-dlp
+        subprocess.run(command, check=True)
+
+        # Return the downloaded file
+        return FileResponse(
+            mp3_path,
+            media_type="audio/mpeg",
+            filename="download.mp3"
+        )
+
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Download failed: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Server error: {str(e)}"
+        )
